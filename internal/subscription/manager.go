@@ -245,11 +245,14 @@ func (m *Manager) doRefresh() {
 	m.status.NodesModified = false
 	m.mu.Unlock()
 
+	// Get current port mapping to preserve existing node ports
+	portMap := m.boxMgr.CurrentPortMap()
+
 	// Create new config with updated nodes
 	newCfg := m.createNewConfig(nodes)
 
-	// Trigger BoxManager reload
-	if err := m.boxMgr.Reload(newCfg); err != nil {
+	// Trigger BoxManager reload with port preservation
+	if err := m.boxMgr.ReloadWithPortMap(newCfg, portMap); err != nil {
 		m.logger.Errorf("reload failed: %v", err)
 		m.mu.Lock()
 		m.status.LastError = err.Error()

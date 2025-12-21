@@ -610,12 +610,39 @@ func (m *Manager) TriggerReload(ctx context.Context) error {
 
 	m.mu.RLock()
 	cfgCopy := m.copyConfigLocked()
+	portMap := m.cfg.BuildPortMap() // Preserve existing port assignments
 	m.mu.RUnlock()
 
 	if cfgCopy == nil {
 		return errConfigUnavailable
 	}
-	return m.Reload(cfgCopy)
+	return m.ReloadWithPortMap(cfgCopy, portMap)
+}
+
+// ReloadWithPortMap gracefully switches to a new configuration, preserving port assignments.
+func (m *Manager) ReloadWithPortMap(newCfg *config.Config, portMap map[string]uint16) error {
+	if newCfg == nil {
+		return errors.New("new config is nil")
+	}
+
+	// Apply port mapping to preserve existing node ports
+	if portMap != nil && len(portMap) > 0 {
+		if err := newCfg.NormalizeWithPortMap(portMap); err != nil {
+			return fmt.Errorf("normalize config with port map: %w", err)
+		}
+	}
+
+	return m.Reload(newCfg)
+}
+
+// CurrentPortMap returns the current port mapping from the active configuration.
+func (m *Manager) CurrentPortMap() map[string]uint16 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.cfg == nil {
+		return nil
+	}
+	return m.cfg.BuildPortMap()
 }
 
 // --- Helper functions ---

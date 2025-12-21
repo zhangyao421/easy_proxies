@@ -94,6 +94,12 @@ type NodeConfig struct {
 	Source   NodeSource `yaml:"-" json:"source,omitempty"` // Runtime only, not persisted
 }
 
+// NodeKey returns a unique identifier for the node based on its URI.
+// This is used to preserve port assignments across reloads.
+func (n *NodeConfig) NodeKey() string {
+	return n.URI
+}
+
 // Load reads YAML config from disk and applies defaults/validation.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -310,6 +316,158 @@ func (c *Config) normalize() error {
 				c.Nodes[idx].Port = newPort
 			}
 		}
+	}
+
+	return nil
+}
+
+// BuildPortMap creates a mapping from node URI to port for existing nodes.
+// This is used to preserve port assignments when reloading configuration.
+func (c *Config) BuildPortMap() map[string]uint16 {
+	portMap := make(map[string]uint16)
+	for _, node := range c.Nodes {
+		if node.Port > 0 {
+			portMap[node.NodeKey()] = node.Port
+		}
+	}
+	return portMap
+}
+
+// NormalizeWithPortMap applies defaults and validation, preserving port assignments
+// for nodes that exist in the provided port map.
+func (c *Config) NormalizeWithPortMap(portMap map[string]uint16) error {
+	if c.Mode == "" {
+		c.Mode = "pool"
+	}
+	if c.Mode == "multi_port" {
+		c.Mode = "multi-port"
+	}
+	switch c.Mode {
+	case "pool", "multi-port", "hybrid":
+	default:
+		return fmt.Errorf("unsupported mode %q (use 'pool', 'multi-port', or 'hybrid')", c.Mode)
+	}
+	if c.Listener.Address == "" {
+		c.Listener.Address = "0.0.0.0"
+	}
+	if c.Listener.Port == 0 {
+		c.Listener.Port = 2323
+	}
+	if c.Pool.Mode == "" {
+		c.Pool.Mode = "sequential"
+	}
+	if c.Pool.FailureThreshold <= 0 {
+		c.Pool.FailureThreshold = 3
+	}
+	if c.Pool.BlacklistDuration <= 0 {
+		c.Pool.BlacklistDuration = 24 * time.Hour
+	}
+	if c.MultiPort.Address == "" {
+		c.MultiPort.Address = "0.0.0.0"
+	}
+	if c.MultiPort.BasePort == 0 {
+		c.MultiPort.BasePort = 28000
+	}
+	if c.Management.Listen == "" {
+		c.Management.Listen = "127.0.0.1:9090"
+	}
+	if c.Management.ProbeTarget == "" {
+		c.Management.ProbeTarget = "www.apple.com:80"
+	}
+	if c.Management.Enabled == nil {
+		defaultEnabled := true
+		c.Management.Enabled = &defaultEnabled
+	}
+	if c.SubscriptionRefresh.Interval <= 0 {
+		c.SubscriptionRefresh.Interval = 1 * time.Hour
+	}
+	if c.SubscriptionRefresh.Timeout <= 0 {
+		c.SubscriptionRefresh.Timeout = 30 * time.Second
+	}
+	if c.SubscriptionRefresh.HealthCheckTimeout <= 0 {
+		c.SubscriptionRefresh.HealthCheckTimeout = 60 * time.Second
+	}
+	if c.SubscriptionRefresh.DrainTimeout <= 0 {
+		c.SubscriptionRefresh.DrainTimeout = 30 * time.Second
+	}
+	if c.SubscriptionRefresh.MinAvailableNodes <= 0 {
+		c.SubscriptionRefresh.MinAvailableNodes = 1
+	}
+
+	if len(c.Nodes) == 0 {
+		return errors.New("config.nodes cannot be empty")
+	}
+
+	// Build set of ports already assigned from portMap
+	usedPorts := make(map[uint16]bool)
+	if c.Mode == "hybrid" {
+		usedPorts[c.Listener.Port] = true
+	}
+
+	// First pass: assign ports from portMap for existing nodes
+	for idx := range c.Nodes {
+		c.Nodes[idx].Name = strings.TrimSpace(c.Nodes[idx].Name)
+		c.Nodes[idx].URI = strings.TrimSpace(c.Nodes[idx].URI)
+		if c.Nodes[idx].URI == "" {
+			return fmt.Errorf("node %d is missing uri", idx)
+		}
+
+		// Extract name from URI fragment if not provided
+		if c.Nodes[idx].Name == "" {
+			if parsed, err := url.Parse(c.Nodes[idx].URI); err == nil && parsed.Fragment != "" {
+				if decoded, err := url.QueryUnescape(parsed.Fragment); err == nil {
+					c.Nodes[idx].Name = decoded
+				} else {
+					c.Nodes[idx].Name = parsed.Fragment
+				}
+			}
+		}
+		if c.Nodes[idx].Name == "" {
+			c.Nodes[idx].Name = fmt.Sprintf("node-%d", idx)
+		}
+
+		// Check if this node has a preserved port from portMap
+		if c.Mode == "multi-port" || c.Mode == "hybrid" {
+			nodeKey := c.Nodes[idx].NodeKey()
+			if existingPort, ok := portMap[nodeKey]; ok && existingPort > 0 {
+				c.Nodes[idx].Port = existingPort
+				usedPorts[existingPort] = true
+				log.Printf("✅ Preserved port %d for node %q", existingPort, c.Nodes[idx].Name)
+			}
+		}
+	}
+
+	// Second pass: assign new ports for nodes without preserved ports
+	portCursor := c.MultiPort.BasePort
+	for idx := range c.Nodes {
+		if c.Nodes[idx].Port == 0 && (c.Mode == "multi-port" || c.Mode == "hybrid") {
+			// Find next available port that's not used
+			for usedPorts[portCursor] || !isPortAvailable(c.MultiPort.Address, portCursor) {
+				portCursor++
+				if portCursor > 65535 {
+					return fmt.Errorf("no available ports found starting from %d", c.MultiPort.BasePort)
+				}
+			}
+			c.Nodes[idx].Port = portCursor
+			usedPorts[portCursor] = true
+			log.Printf("📌 Assigned new port %d for node %q", portCursor, c.Nodes[idx].Name)
+			portCursor++
+		} else if c.Nodes[idx].Port == 0 {
+			c.Nodes[idx].Port = portCursor
+			portCursor++
+		}
+
+		// Apply default credentials
+		if c.Mode == "multi-port" || c.Mode == "hybrid" {
+			if c.Nodes[idx].Username == "" {
+				c.Nodes[idx].Username = c.MultiPort.Username
+				c.Nodes[idx].Password = c.MultiPort.Password
+			}
+		}
+	}
+
+	if c.LogLevel == "" {
+		c.LogLevel = "info"
 	}
 
 	return nil
