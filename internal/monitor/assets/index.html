@@ -908,6 +908,7 @@
     <div class="tabs">
       <button class="tab active" onclick="switchTab('monitor')">📊 节点监控</button>
       <button class="tab" onclick="switchTab('manage')">⚙️ 节点管理</button>
+      <button class="tab" onclick="switchTab('debug')">🐞 调试面板</button>
     </div>
 
     <!-- 监控页面 -->
@@ -1016,6 +1017,40 @@
         <p>点击"添加节点"开始配置</p>
       </div>
     </div><!-- end manageTab -->
+
+    <!-- 调试面板 -->
+    <div id="debugTab" class="tab-content">
+      <div class="manage-header">
+        <h2>调试面板</h2>
+        <p class="manage-desc">查看节点调用统计、成功率和最近使用情况</p>
+      </div>
+
+      <div class="stats">
+        <div class="stat-card">
+          <div class="stat-label">总调用次数</div>
+          <div class="stat-value" id="debugTotalCalls">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">总成功次数</div>
+          <div class="stat-value" style="color: var(--success);" id="debugTotalSuccess">0</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">整体成功率</div>
+          <div class="stat-value" id="debugSuccessRate">0%</div>
+        </div>
+      </div>
+
+      <div id="debugNodesContainer" class="nodes-grid"></div>
+
+      <div id="debugEmptyState" class="empty" style="display: none;">
+        <svg width="64" height="64" viewBox="0 0 64 64" fill="none" opacity="0.2">
+          <circle cx="32" cy="32" r="30" stroke="currentColor" stroke-width="4"/>
+          <path d="M32 16v32M16 32h32" stroke="currentColor" stroke-width="4" stroke-linecap="round"/>
+        </svg>
+        <h3>暂无调试数据</h3>
+        <p>节点使用后将显示统计信息</p>
+      </div>
+    </div><!-- end debugTab -->
   </div>
 
   <div id="toast" class="toast">
@@ -1615,6 +1650,104 @@
       }
     }
 
+    // ========== 调试面板功能 ==========
+
+    async function loadDebugData() {
+      try {
+        const res = await fetch('/api/debug');
+        if (res.status === 401) {
+          showToast('请先登录', 'error');
+          document.getElementById('loginOverlay').classList.add('show');
+          return;
+        }
+        if (!res.ok) throw new Error('加载失败');
+        const data = await res.json();
+        renderDebugData(data);
+      } catch (err) {
+        showToast('加载调试数据失败: ' + err.message, 'error');
+      }
+    }
+
+    function renderDebugData(data) {
+      const nodes = data.nodes || [];
+      const container = document.getElementById('debugNodesContainer');
+      const emptyState = document.getElementById('debugEmptyState');
+
+      document.getElementById('debugTotalCalls').textContent = data.total_calls || 0;
+      document.getElementById('debugTotalSuccess').textContent = data.total_success || 0;
+
+      const rateEl = document.getElementById('debugSuccessRate');
+      const rate = data.success_rate || 0;
+      rateEl.textContent = rate.toFixed(1) + '%';
+      rateEl.style.color = rate > 90 ? 'var(--success)' : (rate > 70 ? 'var(--warning)' : 'var(--error)');
+
+      if (nodes.length === 0) {
+        container.innerHTML = '';
+        emptyState.style.display = 'block';
+        return;
+      }
+
+      emptyState.style.display = 'none';
+      container.innerHTML = nodes.map(node => {
+        const calls = (node.success_count || 0) + (node.failure_count || 0);
+        const successRate = calls > 0 ? ((node.success_count || 0) / calls * 100) : 0;
+        const rateColor = successRate > 90 ? 'var(--success)' : (successRate > 70 ? 'var(--warning)' : 'var(--error)');
+        const timeline = node.timeline || [];
+
+        const timelineHtml = timeline.length > 0 ? timeline.map(t => {
+          const color = t.success ? 'var(--success)' : 'var(--error)';
+          let time = '未知时间';
+          try {
+            const d = new Date(t.time);
+            if (!isNaN(d.getTime())) {
+              time = d.toLocaleTimeString('zh-CN');
+            }
+          } catch (e) {}
+          const title = `${time} - ${t.success ? '成功' : '失败'}${t.latency_ms > 0 ? ' (' + t.latency_ms + 'ms)' : ''}${t.error ? ' - ' + t.error : ''}`;
+          return `<div style="width:10px;height:10px;border-radius:50%;background:${color};flex-shrink:0;" title="${escapeHtml(title)}"></div>`;
+        }).join('') : '<span style="font-size:12px;color:var(--text-secondary);">暂无最近记录</span>';
+
+        return `
+          <div class="node-card">
+            <div class="node-header" style="margin-bottom:16px;">
+              <div class="node-info">
+                <div class="node-name">${escapeHtml(node.name || node.tag)}</div>
+                <div class="node-tag">${escapeHtml(node.tag)}</div>
+              </div>
+              <div style="text-align:right;">
+                <div style="font-size:32px;font-weight:700;color:${rateColor};">${successRate.toFixed(1)}%</div>
+                <div style="font-size:12px;color:var(--text-secondary);">共 ${calls} 次调用</div>
+              </div>
+            </div>
+            <div class="metrics" style="margin-bottom:16px;">
+              <div class="metric">
+                <div class="metric-label">成功次数</div>
+                <div class="metric-value success">${node.success_count || 0}</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">失败次数</div>
+                <div class="metric-value ${node.failure_count > 0 ? 'error' : ''}">${node.failure_count || 0}</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">活跃连接</div>
+                <div class="metric-value">${node.active_connections || 0}</div>
+              </div>
+              <div class="metric">
+                <div class="metric-label">最近延迟</div>
+                <div class="metric-value">${node.last_latency_ms >= 0 ? node.last_latency_ms + 'ms' : '—'}</div>
+              </div>
+            </div>
+            <div style="background:rgba(0,0,0,0.03);padding:12px 16px;border-radius:12px;">
+              <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">最近 ${timeline.length} 次调用</div>
+              <div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center;">
+                ${timelineHtml}
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
     // ========== 系统设置功能 ==========
 
     function showSettingsModal() {
@@ -1688,6 +1821,8 @@
 
       if (tabName === 'manage') {
         loadConfigNodes();
+      } else if (tabName === 'debug') {
+        loadDebugData();
       }
     }
 
@@ -1770,7 +1905,7 @@
     function escapeHtml(text) {
       const div = document.createElement('div');
       div.textContent = text;
-      return div.innerHTML;
+      return div.innerHTML.replace(/"/g, '&quot;');
     }
 
     // 显示添加节点弹窗

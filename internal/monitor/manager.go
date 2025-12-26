@@ -38,20 +38,32 @@ type NodeInfo struct {
 	Port          uint16 `json:"port,omitempty"`
 }
 
+// TimelineEvent represents a single usage event for debug tracking.
+type TimelineEvent struct {
+	Time      time.Time `json:"time"`
+	Success   bool      `json:"success"`
+	LatencyMs int64     `json:"latency_ms"`
+	Error     string    `json:"error,omitempty"`
+}
+
+const maxTimelineSize = 20
+
 // Snapshot is a runtime view of a proxy node.
 type Snapshot struct {
 	NodeInfo
-	FailureCount      int           `json:"failure_count"`
-	Blacklisted       bool          `json:"blacklisted"`
-	BlacklistedUntil  time.Time     `json:"blacklisted_until"`
-	ActiveConnections int32         `json:"active_connections"`
-	LastError         string        `json:"last_error,omitempty"`
-	LastFailure       time.Time     `json:"last_failure,omitempty"`
-	LastSuccess       time.Time     `json:"last_success,omitempty"`
-	LastProbeLatency  time.Duration `json:"last_probe_latency,omitempty"`
-	LastLatencyMs     int64         `json:"last_latency_ms"`
-	Available         bool          `json:"available"`          // 节点是否可用
-	InitialCheckDone  bool          `json:"initial_check_done"` // 初始检查是否完成
+	FailureCount      int             `json:"failure_count"`
+	SuccessCount      int64           `json:"success_count"`
+	Blacklisted       bool            `json:"blacklisted"`
+	BlacklistedUntil  time.Time       `json:"blacklisted_until"`
+	ActiveConnections int32           `json:"active_connections"`
+	LastError         string          `json:"last_error,omitempty"`
+	LastFailure       time.Time       `json:"last_failure,omitempty"`
+	LastSuccess       time.Time       `json:"last_success,omitempty"`
+	LastProbeLatency  time.Duration   `json:"last_probe_latency,omitempty"`
+	LastLatencyMs     int64           `json:"last_latency_ms"`
+	Available         bool            `json:"available"`
+	InitialCheckDone  bool            `json:"initial_check_done"`
+	Timeline          []TimelineEvent `json:"timeline,omitempty"`
 }
 
 type probeFunc func(ctx context.Context) (time.Duration, error)
@@ -64,6 +76,8 @@ type EntryHandle struct {
 type entry struct {
 	info             NodeInfo
 	failure          int
+	success          int64
+	timeline         []TimelineEvent
 	blacklist        bool
 	until            time.Time
 	lastError        string
@@ -73,8 +87,8 @@ type entry struct {
 	active           atomic.Int32
 	probe            probeFunc
 	release          releaseFunc
-	initialCheckDone bool // 初始健康检查是否完成
-	available        bool // 节点是否可用（初始检查通过）
+	initialCheckDone bool
+	available        bool
 	mu               sync.RWMutex
 }
 
@@ -268,7 +282,10 @@ func (m *Manager) Register(info NodeInfo) *EntryHandle {
 	defer m.mu.Unlock()
 	e, ok := m.nodes[info.Tag]
 	if !ok {
-		e = &entry{info: info}
+		e = &entry{
+			info:     info,
+			timeline: make([]TimelineEvent, 0, maxTimelineSize),
+		}
 		m.nodes[info.Tag] = e
 	} else {
 		e.info = info
@@ -381,13 +398,20 @@ func (e *entry) snapshot() Snapshot {
 	if e.lastProbe > 0 {
 		latencyMs = e.lastProbe.Milliseconds()
 		if latencyMs == 0 {
-			latencyMs = 1 // Round up sub-millisecond latencies to 1ms
+			latencyMs = 1
 		}
+	}
+
+	var timelineCopy []TimelineEvent
+	if len(e.timeline) > 0 {
+		timelineCopy = make([]TimelineEvent, len(e.timeline))
+		copy(timelineCopy, e.timeline)
 	}
 
 	return Snapshot{
 		NodeInfo:          e.info,
 		FailureCount:      e.failure,
+		SuccessCount:      e.success,
 		Blacklisted:       e.blacklist,
 		BlacklistedUntil:  e.until,
 		ActiveConnections: e.active.Load(),
@@ -398,21 +422,54 @@ func (e *entry) snapshot() Snapshot {
 		LastLatencyMs:     latencyMs,
 		Available:         e.available,
 		InitialCheckDone:  e.initialCheckDone,
+		Timeline:          timelineCopy,
 	}
 }
 
 func (e *entry) recordFailure(err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	errStr := err.Error()
 	e.failure++
-	e.lastError = err.Error()
+	e.lastError = errStr
 	e.lastFail = time.Now()
+	e.appendTimelineLocked(false, 0, errStr)
 }
 
 func (e *entry) recordSuccess() {
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.success++
 	e.lastOK = time.Now()
-	e.mu.Unlock()
+	e.appendTimelineLocked(true, 0, "")
+}
+
+func (e *entry) recordSuccessWithLatency(latency time.Duration) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.success++
+	e.lastOK = time.Now()
+	e.lastProbe = latency
+	latencyMs := latency.Milliseconds()
+	if latencyMs == 0 && latency > 0 {
+		latencyMs = 1
+	}
+	e.appendTimelineLocked(true, latencyMs, "")
+}
+
+func (e *entry) appendTimelineLocked(success bool, latencyMs int64, errStr string) {
+	evt := TimelineEvent{
+		Time:      time.Now(),
+		Success:   success,
+		LatencyMs: latencyMs,
+		Error:     errStr,
+	}
+	if len(e.timeline) >= maxTimelineSize {
+		copy(e.timeline, e.timeline[1:])
+		e.timeline[len(e.timeline)-1] = evt
+	} else {
+		e.timeline = append(e.timeline, evt)
+	}
 }
 
 func (e *entry) blacklistUntil(until time.Time) {
@@ -476,8 +533,7 @@ func (h *EntryHandle) RecordSuccessWithLatency(latency time.Duration) {
 	if h == nil || h.ref == nil {
 		return
 	}
-	h.ref.recordSuccess()
-	h.ref.recordProbeLatency(latency)
+	h.ref.recordSuccessWithLatency(latency)
 }
 
 // Blacklist marks the node unavailable until the given deadline.

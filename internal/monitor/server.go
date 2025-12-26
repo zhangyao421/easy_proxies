@@ -91,6 +91,7 @@ func NewServer(cfg Config, mgr *Manager, logger *log.Logger) *Server {
 	mux.HandleFunc("/api/nodes/config/", s.withAuth(s.handleConfigNodeItem))
 	mux.HandleFunc("/api/nodes/probe-all", s.withAuth(s.handleProbeAll))
 	mux.HandleFunc("/api/nodes/", s.withAuth(s.handleNodeAction))
+	mux.HandleFunc("/api/debug", s.withAuth(s.handleDebug))
 	mux.HandleFunc("/api/export", s.withAuth(s.handleExport))
 	mux.HandleFunc("/api/subscription/status", s.withAuth(s.handleSubscriptionStatus))
 	mux.HandleFunc("/api/subscription/refresh", s.withAuth(s.handleSubscriptionRefresh))
@@ -205,6 +206,45 @@ func (s *Server) handleNodes(w http.ResponseWriter, r *http.Request) {
 	// 只返回初始检查通过的可用节点
 	payload := map[string]any{"nodes": s.mgr.SnapshotFiltered(true)}
 	writeJSON(w, payload)
+}
+
+func (s *Server) handleDebug(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	snapshots := s.mgr.Snapshot()
+	var totalCalls, totalSuccess int64
+	debugNodes := make([]map[string]any, 0, len(snapshots))
+	for _, snap := range snapshots {
+		totalCalls += snap.SuccessCount + int64(snap.FailureCount)
+		totalSuccess += snap.SuccessCount
+		debugNodes = append(debugNodes, map[string]any{
+			"tag":                snap.Tag,
+			"name":               snap.Name,
+			"mode":               snap.Mode,
+			"port":               snap.Port,
+			"failure_count":      snap.FailureCount,
+			"success_count":      snap.SuccessCount,
+			"active_connections": snap.ActiveConnections,
+			"last_latency_ms":    snap.LastLatencyMs,
+			"last_success":       snap.LastSuccess,
+			"last_failure":       snap.LastFailure,
+			"last_error":         snap.LastError,
+			"blacklisted":        snap.Blacklisted,
+			"timeline":           snap.Timeline,
+		})
+	}
+	var successRate float64
+	if totalCalls > 0 {
+		successRate = float64(totalSuccess) / float64(totalCalls) * 100
+	}
+	writeJSON(w, map[string]any{
+		"nodes":         debugNodes,
+		"total_calls":   totalCalls,
+		"total_success": totalSuccess,
+		"success_rate":  successRate,
+	})
 }
 
 func (s *Server) handleNodeAction(w http.ResponseWriter, r *http.Request) {
