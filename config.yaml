@@ -1,0 +1,48 @@
+
+mode: pool
+
+# 日志级别: debug, info, warn, error
+log_level: info
+
+# 全局跳过 SSL 证书验证（默认 false，不建议在生产环境启用）
+skip_cert_verify: false
+
+# 外部 IP 地址，用于导出配置时替换 0.0.0.0（可选）
+# external_ip: "your.public.ip"
+
+# ───────────────────────────────────────────────────────────────
+# 监听配置（Pool 模式入口）
+# ───────────────────────────────────────────────────────────────
+listener:
+  address: 0.0.0.0      # 监听地址
+  port: 2323            # 监听端口
+  username: username    # 代理认证用户名
+  password: password    # 代理认证密码
+
+# ───────────────────────────────────────────────────────────────
+# 代理池配置
+# ───────────────────────────────────────────────────────────────
+pool:
+  # 调度模式: sequential（顺序）, random（随机）
+  mode: sequential
+  # 连续失败多少次后加入黑名单
+  failure_threshold: 3
+  # 黑名单持续时间
+  blacklist_duration: 24h
+
+
+management:
+  enabled: true                                      # 是否启用管理面板
+  listen: 0.0.0.0:9091                               # 监听地址
+  probe_target: http://cp.cloudflare.com/generate_204  # 健康检查目标
+  password: ""                                       # WebUI 访问密码，为空则不需要密码
+
+geoip:
+  enabled: true                                     # 是否启用 GeoIP 地域分区
+  database_path: "./GeoLite2-Country.mmdb"           # GeoIP 数据库路径（首次启动时自动下载）
+  auto_update_enabled: true                          # 是否启用自动更新数据库（推荐）
+  auto_update_interval: 24h                          # 自动更新间隔（默认 24 小时）
+
+
+nodes_file: nodes.txt
+
